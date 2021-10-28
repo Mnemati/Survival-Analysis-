@@ -1,1 +1,2 @@
 # Survival-Analysis-
+$\beta$
