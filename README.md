@@ -1,4 +1,4 @@
 # Survival Analysis 
 
-## This 
+### This repository contains a prediction class for kidney transplantation failure time prediction. 
 
