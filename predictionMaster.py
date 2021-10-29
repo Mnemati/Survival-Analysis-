@@ -150,10 +150,28 @@ class PredictionMaster(object):
         #    data_x['data_mm'] = pd.read_csv(file_path)
 
 
+    def train(self, X, y, train_size):
+        for seed in self.seeds:
+            summary_file = PredictionMaster.save_results(save_path, save_name, open_close= 'open')
+            print('hello', file=summary_file)
+            summary_file.close()
 
 
-    def save_results(self, save_path):
-        pass
 
-    def predict(self):
-        pass
+
+
+    def save_results(self, save_path , save_name, open_close):
+        '''
+        This function opens and closes a text file that
+        contain the results of the survival models
+        - open_close:
+            - if 'open', it opens a text file
+            - if 'close' it closes the text file
+        '''
+        self.save_path = save_path
+        self.save_name = save_name
+        self.result_file_name = f'{self.save_path}/{self.save_name}.txt'
+        if open_close == 'open':
+            return open(self.result_file_name, 'w')
+        elif open_close == 'close':
+            return self.result_file_name.close()
