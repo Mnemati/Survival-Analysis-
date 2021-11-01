@@ -1,13 +1,16 @@
 from collections import defaultdict
 import numpy as np
 import pandas as pd
+import pathlib
+from datetime import date
+import os
 
 class PredictionMaster(object):
     '''This class loads the HLA data, perform cross validation
     and calculates the accuracy of the predictions using
     3 algorithms: coxnet, random survival forest and gradient boosted trees'''
 
-    def __init__(self, model,  model_param_dict,  feature_sets, train_size, valid_size, test_size, cv_folds,  seeds, n_jobs, verbose):
+    def __init__(self, model,  model_param_dict,  feature_sets, end_point,  train_size, valid_size, test_size, cv_folds,  seeds, n_jobs, verbose):
         '''
         Initialization of prediction master object:
         - model:
@@ -58,6 +61,7 @@ class PredictionMaster(object):
         # write a piece of code that throws an error if the model name is not cerrectly chose
         self.model_params = model_param_dict
         self.feature_sets = feature_sets
+        self.end_point = end_point
         self.train_size = train_size
         self.valid_size = valid_size
         self.test_size = test_size
@@ -65,6 +69,9 @@ class PredictionMaster(object):
         self.seeds = seeds
         self.verbose = verbose
         self.n_jobs = n_jobs
+        self.run_name = f'{date.today()}_{len(self.feature_sets)}_feature sets_{self.model}_{self.test_size}_test_size_' \
+                        f'{self.train_size}_train_size_{self.valid_size}_valid_size_{self.cv_folds}_cv_folds_' \
+                        f'{self.feature_sets["basic"][0]}_basic_feature_{end_point}_end_point'
 
 
     def load_data(self, data_path, threshold):
@@ -94,6 +101,8 @@ class PredictionMaster(object):
             target variable
         '''
         global data_x
+        self.data_path = data_path
+        self.result_path = data_path
         data_x = defaultdict()
         data_x['basic'] = {}
         if 'basic' in self.feature_sets and self.feature_sets['basic'] == ['pre']:
@@ -150,28 +159,36 @@ class PredictionMaster(object):
         #    data_x['data_mm'] = pd.read_csv(file_path)
 
 
-    def train(self, X, y, train_size):
-        for seed in self.seeds:
-            summary_file = PredictionMaster.save_results(save_path, save_name, open_close= 'open')
-            print('hello', file=summary_file)
-            summary_file.close()
+    def train(self, X, y, train_size, save_results):
+        if save_results == False:
+            pass
+        if save_results == True:
+            self.run_path = f'{self.result_path}/{self.run_name}'
+            pathlib.Path(self.run_path).mkdir(mode=0o775, exist_ok=True)
+            for seed in self.seeds:
+                summary_file_name = f'{self.run_path}/Summary_seed={seed}.txt'
+                summary_file = open(summary_file_name, 'w')
+                best_variant = {}
+                for feat, variants in self.feature_sets.items():
+                    print('----------')
+                    print(feat, variants, f'seed number = {seed} ')
+                    print('----------')
+                    best_variant[feat] = ('', 0)
+                    for v in variants:
+                        print(f'current feature set: {feat}; variant: {v}')
+                        print('seperating into training and test sets')
+                        if feat != 'all':
+                            if feat == 'basic':
+                                data_x_v = pd.concat
 
 
 
 
 
-    def save_results(self, save_path , save_name, open_close):
-        '''
-        This function opens and closes a text file that
-        contain the results of the survival models
-        - open_close:
-            - if 'open', it opens a text file
-            - if 'close' it closes the text file
-        '''
-        self.save_path = save_path
-        self.save_name = save_name
-        self.result_file_name = f'{self.save_path}/{self.save_name}.txt'
-        if open_close == 'open':
-            return open(self.result_file_name, 'w')
-        elif open_close == 'close':
-            return self.result_file_name.close()
+
+
+                summary_file.close()
+
+
+
+
