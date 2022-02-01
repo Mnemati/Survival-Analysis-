@@ -1,0 +1,866 @@
+"""
+Created on Wed Apr 15 15:22:20 2020
+
+@author: kevin
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import date
+import pickle
+import pathlib
+import statistics
+
+from sksurv.linear_model import CoxnetSurvivalAnalysis
+from sksurv.metrics import concordance_index_censored
+from sksurv.metrics import cumulative_dynamic_auc
+from sklearn.model_selection import train_test_split
+from sksurv.ensemble import GradientBoostingSurvivalAnalysis
+from sksurv.ensemble import RandomSurvivalForest
+from sklearn.model_selection import GridSearchCV, ShuffleSplit
+from sksurv.svm import FastKernelSurvivalSVM
+# from sksurv.svm import FastSurvivalSVM
+from sklearn.model_selection import KFold
+
+# Fraction of samples to hold out for testing
+test_size = 0.2
+# Fraction of samples to use for validation
+valid_size = 0.2
+# Fraction of samples to use for training
+train_size = 1 - test_size - valid_size
+
+# Number of CPU cores to use: random forest parallelizes for an individual
+# forest, while the others parallelize only for grid search CV
+n_jobs = -1
+# Seed to provide as random state to scikit-learn and scikit-survival
+seeds = [100, 882021, 872021, 862021, 852021, 842021, 832021, 822021, 812021, 892021]
+#seeds = [100, 200]
+# Model to use: can be one of 'coxnet', 'random_forest', 'gradient_boosting',
+# 'kernel_svm'
+# model = 'coxnet'
+model = 'random_forest'
+# model = 'gradient_boosting'
+# model = 'kernel_svm'
+# Number of folds for cross validation
+cv_folds = 5
+# Verbosity (set to 0 to suppress progress messages in console)
+verbose = 1
+# Number of time steps to average AUC over for cumulative dynamic AUC metric
+auc_time_steps = 5
+# Whether to save the trained model as a pickle file
+if model == 'coxnet':
+    save_model = True
+else:
+    save_model = False
+
+mm_feat_set = ['total', 'a_b_dr']
+# mm_feat_set = ['total']
+
+# type_feat_set = ['all', 'freq']
+type_feat_set = ['all']
+type_freq = [100, 2000, 5000]
+
+pair_feat_set = ['all', 'freq']
+pair_freq = [1000]
+
+site_feat_set = ['all']
+
+# basic features should be a list of size one. Pre or post. If 'post', it concatenates
+# post features to the pre features
+basic_feat_set = ['pre']
+# basic_feat_set = ['post']
+
+# all_feat_set, concatenates all the data, including data_basic(pre- or post), MM (total),
+# MM(A-B-DR), types (all), pairs (all)
+# Choose all_feat_set when all other feature sets are chosen, otherwise choose it alone.
+
+encoding = 'target'
+target_encoding_version = '1'
+target_encoding_version = '2'
+target_encoding_year = 10
+
+
+
+#encoding = 'oneHot'
+print(f'encoding version:{encoding}_V{target_encoding_version}')
+all_feat_set = ['all']
+
+#feature_sets = {'basic': basic_feat_set, 'mm': mm_feat_set, 'types': type_feat_set}
+# feature_sets = {'basic': basic_feat_set, 'mm': mm_feat_set, 'types': type_feat_set, 'pairs': pair_feat_set}
+# feature_sets = {'basic': basic_feat_set, 'mm': mm_feat_set}
+feature_sets = {'types': type_feat_set}
+# feature_sets = {'pairs': pair_feat_set}
+# feature_sets = {'all': all_feat_set}
+
+# feature_sets = {'all': all_feat_set}
+
+# Data paths and run (folder) name template
+data_path = "/nethome/mnemati/mnemati_datasets/KT-8-7-2020"
+results_path = "/nethome/mnemati/mnemati_datasets/KT-8-7-2020"
+#data_path = '/data'
+#results_path = '/data'
+
+
+# data_path = '/nethome/mnemati/mnemati_datasets/KT-01-18-2021'
+
+# run_name = (f'{date.today()}_{len(feature_sets)}featureSets_{model}'
+#             + f'_{test_size}test_size_{valid_size}valid_size')
+
+
+# if the length of feature set is one, the name of directory contains the feature and
+# the variants in the name of directory
+
+if encoding == 'oneHot':
+    if len(feature_sets)>1:
+        run_name = f'{date.today()}_{len(feature_sets)}featureSets_{model}_{encoding} encoding_{test_size}test_size_{valid_size}valid_size_{basic_feat_set[0]}_basic_feature'
+    else:
+        for key, value in feature_sets.items():
+            feature = key
+            var = value
+        run_name = f'{date.today()}_{len(feature_sets)}featureSets_{model}_{encoding} encoding_{test_size}test_size_{valid_size}valid_size_{basic_feat_set[0]}_basic_feature_{feature}_{var}'
+
+if encoding == 'target':
+    if target_encoding_version == '1':
+        if len(feature_sets) > 1:
+            run_name = f'{date.today()}_{len(feature_sets)}featureSets_{model}_{encoding} encoding_ version {target_encoding_version}_{test_size}test_size_{valid_size}valid_size_{basic_feat_set[0]}_basic_feature'
+        else:
+            for key, value in feature_sets.items():
+                feature = key
+                var = value
+            run_name = f'{date.today()}_{len(feature_sets)}featureSets_{model}_{encoding} encoding_ version {target_encoding_version}_{test_size}test_size_{valid_size}valid_size_{basic_feat_set[0]}_basic_feature_{feature}_{var}'
+    if target_encoding_version == '2':
+        if len(feature_sets) > 1:
+            run_name = f'{date.today()}_{len(feature_sets)}featureSets_{model}_{encoding} encoding_version {target_encoding_version}_{target_encoding_year} years_{test_size}test_size_{valid_size}valid_size_{basic_feat_set[0]}_basic_feature'
+        else:
+            for key, value in feature_sets.items():
+                feature = key
+                var = value
+            run_name = f'{date.today()}_{len(feature_sets)}featureSets_{model}_{encoding} encoding_ version {target_encoding_version}_{target_encoding_year} years_{test_size}test_size_{valid_size}valid_size_{basic_feat_set[0]}_basic_feature_{feature}_{var}'
+
+
+print('-----------------------------------')
+print(run_name)
+# Parameters for Coxnet
+alpha_range = np.logspace(-2, -4, 11)
+l1_ratio_range = np.linspace(0.1, 1, 10)
+# l1_ratio_range = np.linspace(0.1, 1, 2)
+
+# Parameters for random survival forest
+# param_rf = {'n_estimators': np.arange(100, 501, 100),
+#             'max_depth': np.arange(10, 51, 10)}
+param_rf = {'n_estimators': [500],
+            'max_features': ['sqrt'],
+            # 'max_depth': np.arange(10, 21, 10)}
+            # 'max_features': ['sqrt', 'log2', None],
+            'max_depth': np.arange(5, 16, 5)}
+# param_rf = {'n_estimators': [10],
+#             'max_features': ['sqrt', 'log2', None],
+#             'max_depth': np.arange(5, 11, 5)}
+# param_rf = {'n_estimators': [10, 20]}
+
+# Parameters for gradient boosting
+# param_gb = {'n_estimators': np.arange(20, 201, 20),
+#             'max_depth': np.arange(1, 4)}
+# param_gb = {'n_estimators': np.arange(100, 501, 100),
+#             'max_depth': np.arange(1, 4)}
+param_gb = {'n_estimators': [500],
+            # 'max_depth': np.arange(1, 3),
+            'max_depth': np.arange(1, 4),
+            'subsample': [0.5]}
+
+# Parameters for kernel SVM
+param_ksvm = {'alpha': np.logspace(-2, 2, 5),
+              'rank_ratio': np.linspace(0, 1, 5),
+              'gamma': np.logspace(-2, 2, 5)}
+
+print('n_jobs')
+print(n_jobs)
+print('-------------')
+print('data_path')
+print(data_path)
+print('-------------')
+print('results_path')
+print(results_path)
+print('-------------')
+print('model')
+print(model)
+print('-------------')
+print('feature sets')
+print(feature_sets)
+
+
+# %%
+def cumulative_dynamic_auc_mod(survival_train, survival_test, prediction,
+                               num_time_bins=5, tied_tol=1e-08):
+    # If any survival times in test fold exceed max survival
+    # time in training fold, adjust them to be smaller to
+    # avoid 0 weights in IPCW
+    test_days_mod = survival_test['survival_censoring_days']
+    max_train_days = survival_train['survival_censoring_days'].max()
+    test_days_mod[test_days_mod >= max_train_days] = max_train_days - 1
+    max_time = test_days_mod.max()
+    eval_times = np.linspace(0, max_time, num_time_bins + 2)
+    survival_test_mod = survival_test.copy()
+    survival_test_mod['survival_censoring_days'] = test_days_mod
+    results = cumulative_dynamic_auc(survival_train, survival_test_mod,
+                                     prediction, eval_times[1:-1], tied_tol)
+    return results
+
+def target_encoding_v_1(x_train, x_test, y_train, y_test):
+    '''
+    :param type_train: this contains the raw HLA types
+    :param type_test: This contain the test set raw hla types
+    :param data_x: This is a dictionary that stores all the training data, basic, mm, type
+    :param data_y: This include the data_y
+    - The reason to add data_x and data_y is that in som esituations some of the instances of target encoding
+    should be removed and this helps to remove all the rows
+    :return:
+    '''
+    print('Performing version 1 of target encoding: disregard the censorship')
+    for don_rec in ['DON', 'REC']:
+        for hla_type in ['A', 'B', 'DR']:
+            dict_ = {}
+            category_1 = set(x_train[f'{don_rec}_{hla_type}1'].astype('category').cat.remove_unused_categories())
+            category_2 = set(x_train[f'{don_rec}_{hla_type}2'].astype('category').cat.remove_unused_categories())
+
+            category_3 = set(x_test[f'{don_rec}_{hla_type}1'].astype('category').cat.remove_unused_categories())
+
+            category_4 = set(x_test[f'{don_rec}_{hla_type}2'].astype('category').cat.remove_unused_categories())
+            # remove the hla types exist in test but not training since we cannt map any values to those hla types
+            # category_3: test set locus1: A1, B1, DR1 for donor or recipient
+            # category_1: training set set locus1: A1, B1, DR1 for donor or recipient
+            # the same goes for category 4 and 2 but for locus 2
+            for remove_cat in (category_3 - category_1):
+                idx = x_test[f'{don_rec}_{hla_type}1'] != remove_cat
+                x_test = x_test[idx].reset_index(drop=True)
+                y_test = y_test[idx]
+
+            for remove_cat in (category_4 - category_2):
+                idx = x_test[f'{don_rec}_{hla_type}2'] != remove_cat
+                x_test = x_test[idx].reset_index(drop=True)
+                y_test = y_test[idx]
+
+            '''
+            mutual_type_value are the hla types that are in both locus 1 and locus 2. 
+            we find them. then calculate the weight for both seperately. then take the average to 
+            have a common encoding for both columns. 
+            '''
+            for mutual_type_value in (category_1 & category_2):
+                index_1 = x_train[f'{don_rec}_{hla_type}1'] == mutual_type_value
+                index_2 = x_train[f'{don_rec}_{hla_type}2'] == mutual_type_value
+                targetAvg_1 = y_train['survival_censoring_days'][index_1].mean()
+                targetAvg_2 = y_train['survival_censoring_days'][index_2].mean()
+                targetAvg = (targetAvg_1 + targetAvg_2) / 2
+                dict_[mutual_type_value] = targetAvg
+
+                # loc_1_value are the hla types that can be found in locus 1 but not locus 2
+                # then the average of survival time is used as the encoding.
+                # similar for loc_2_value
+            for loc_1_value in (category_1 - category_2):  # loc_1_value: hla types in first location but not the second
+                index = x_train[f'{don_rec}_{hla_type}1'] == loc_1_value
+                targetAvg_1 = y_train['survival_censoring_days'][index].mean()
+                dict_[loc_1_value] = targetAvg_1
+            for loc_2_value in (category_2 - category_1):  # loc_2_value: hla types in second location but not the first
+                index = x_train[f'{don_rec}_{hla_type}2'] == loc_2_value
+                targetAvg_2 = y_train['survival_censoring_days'][index].mean()
+                dict_[loc_2_value] = targetAvg_2
+            # mapping the weights to training and test set
+            x_train[f'{don_rec}_{hla_type}1'] = x_train[f'{don_rec}_{hla_type}1'].map(
+                dict_)
+            x_test[f'{don_rec}_{hla_type}1'] = x_test[f'{don_rec}_{hla_type}1'].map(
+                dict_)
+            x_train[f'{don_rec}_{hla_type}2'] = x_train[f'{don_rec}_{hla_type}2'].map(
+                dict_)
+            x_test[f'{don_rec}_{hla_type}2'] = x_test[f'{don_rec}_{hla_type}2'].map(dict_)
+    return x_train, x_test, y_train, y_test
+
+
+def target_encoding_v_2(x_train, x_test, y_train, y_test, YEAR):
+    '''
+            This version is like a discrete time target encoding approach. We should consider a specific year.
+            Like 10 years. then remove all censored cases before 100 years. And for the target encoded values,
+            for example for hla A_3, we calculate #transplants failed after year 10 with hla A_3/ #fails + #functions
+            '''
+    # removing transplants in which the survival or censoring days is less than YEAR and are censored at the same time
+
+    '''The following block finds the hla types that are not eligible to be in this analysis. 
+     FE, in DON_B1, the status of all hla 12.0 is False (censored) and all the survival-censoring-days are bellow
+     YEAR * 365. So, they should be removed before calculating the weights for the encodings. Thus, no encoding can be calculated for them. 
+     So they should be removed from trainung and test set. '''
+
+    dict_remove = {}
+    for don_rec in ['DON', 'REC']:
+        for hla_type in ['A', 'B', 'DR']:
+            list_remove_1 = []
+            list_remove_2 = []
+            category_1 = set(x_train[f'{don_rec}_{hla_type}1'].astype('category').cat.remove_unused_categories())
+            category_2 = set(x_train[f'{don_rec}_{hla_type}2'].astype('category').cat.remove_unused_categories())
+            '''this for loop is used to find the categories that all of them are censored 
+            and have last less than YEAR
+            '''
+            for cat in category_1:
+                idx = x_train[f'{don_rec}_{hla_type}1'] == cat
+                y = y_train[idx]
+                if y['status'].sum() == 0:
+                    if ((y['survival_censoring_days'] < 365 * YEAR).sum()) == np.shape(y)[0]:
+                        list_remove_1.append(cat)
+
+            for cat in category_2:
+                idx = x_train[f'{don_rec}_{hla_type}2'] == cat
+                y = y_train[idx]
+                if y['status'].sum() == 0:
+                    if ((y['survival_censoring_days'] < 365 * YEAR).sum()) == np.shape(y)[0]:
+                        list_remove_2.append(cat)
+            # create a dictionary of the categories in which the samples that have those
+            # categories should be removed
+            dict_remove[f'{don_rec}_{hla_type}1'] = list_remove_1
+            dict_remove[f'{don_rec}_{hla_type}2'] = list_remove_2
+    #this for loop removes the samples in which the encoding cannot be calculated for them
+    for hla_type, value_list in dict_remove.items():
+        for val in value_list:
+            idx_train = ~(x_train[hla_type] == val) #ind of training data that have those categories
+            idx_test = ~(x_test[hla_type] == val)
+
+            x_train = x_train[idx_train].reset_index(drop=True)
+            y_train = y_train[idx_train]
+            x_test = x_test[idx_test].reset_index(drop=True)
+            y_test = y_test[idx_test]
+
+    ''' the following, creates a binary column for transplants, failed or functioning wrt YEARS'''
+    # idx is to find the transplants that have lasted more than YEAR or if they failed, the status is uncensored
+    idx = (y_train['survival_censoring_days'] >= (365 * YEAR)) | (
+                (y_train['survival_censoring_days'] < (365 * YEAR)) & y_train['status'] == True)
+    # x_train_df and y_train_df are  auxilary variable so that the original x_train remains unchanged.
+    x_train_df = x_train[
+        idx]  # creating this variable so that hla_type_encoded_train remains as before
+    y_train_df = y_train[idx]
+    status_F_W = y_train_df['survival_censoring_days'] >= (365 * YEAR)
+
+    # hla_type_encoded_train['DON_A2'].cat.remove_unused_categories().value_counts()
+
+    for don_rec in ['DON', 'REC']:
+        for hla_type in ['A', 'B', 'DR']:
+            dict_ = {}
+            category_1 = set(x_train[f'{don_rec}_{hla_type}1'].astype('category').cat.remove_unused_categories())
+
+            category_2 = set(x_train[f'{don_rec}_{hla_type}2'].astype('category').cat.remove_unused_categories())
+
+            category_3 = set(x_test[f'{don_rec}_{hla_type}1'].astype('category').cat.remove_unused_categories())
+
+            category_4 = set(x_test[f'{don_rec}_{hla_type}2'].astype('category').cat.remove_unused_categories())
+
+            for remove_cat in (category_3 - category_1):
+                idx = x_test[f'{don_rec}_{hla_type}1'] != remove_cat
+                x_test = x_test[idx].reset_index(drop=True)
+            for remove_cat in (category_4 - category_2):
+                idx = x_test[f'{don_rec}_{hla_type}2'] != remove_cat
+                x_test = x_test[idx].reset_index(drop=True)
+
+            for mutual_type_value in (category_1 & category_2):
+                index_1 = x_train_df[f'{don_rec}_{hla_type}1'] == mutual_type_value
+                index_2 = x_train_df[f'{don_rec}_{hla_type}2'] == mutual_type_value
+                targetEnc_1 = (status_F_W[index_1] == False).sum() / np.shape(status_F_W[index_1])[0]
+                targetEnc_2 = (status_F_W[index_2] == False).sum() / np.shape(status_F_W[index_2])[0]
+                targetEnc = (targetEnc_1 + targetEnc_2) / 2
+                dict_[mutual_type_value] = targetEnc
+
+            for loc_1_value in (category_1 - category_2):  # loc_1_value: hla types in first location but not the second
+                index = x_train_df[f'{don_rec}_{hla_type}1'] == loc_1_value
+                targetEnc_1 = (status_F_W[index] == False).sum() / np.shape(status_F_W[index])[0]
+                dict_[loc_1_value] = targetEnc_1
+            for loc_2_value in (category_2 - category_1):  # loc_2_value: hla types in second location but not the first
+                index = x_train_df[f'{don_rec}_{hla_type}2'] == loc_2_value
+                targetEnc_2 = (status_F_W[index] == False).sum() / np.shape(status_F_W[index])[0]
+                dict_[loc_2_value] = targetEnc_2
+
+            x_train[f'{don_rec}_{hla_type}1'] = x_train[f'{don_rec}_{hla_type}1'].map(
+                dict_)
+            x_test[f'{don_rec}_{hla_type}1'] = x_test[f'{don_rec}_{hla_type}1'].map(
+                dict_)
+            x_train[f'{don_rec}_{hla_type}2'] = x_train[f'{don_rec}_{hla_type}2'].map(
+                dict_)
+            x_test[f'{don_rec}_{hla_type}2'] = x_test[f'{don_rec}_{hla_type}2'].map(dict_)
+    return x_train, x_test, y_train, y_test
+
+
+# %%
+print('loading the data')
+file_path = f"{data_path}/data_y.csv"
+# file_path = f"{data_path}/data_y_all_cause.csv"
+data_y_unstructured = pd.read_csv(file_path)
+# data_y_unstructured =  data_y_unstructured.drop(['Unnamed: 0'], axis=1)
+s = data_y_unstructured.dtypes
+data_y = np.array([tuple(x) for x in data_y_unstructured.values],
+                  dtype=list(zip(s.index, s)))
+
+file_path = f"{data_path}/data_basic.csv"
+data_basic = pd.read_csv(file_path)
+# data_basic.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+# # Temporarily drop number of mismatches for testing purposes
+# data_basic.drop(['MM'], axis=1, inplace=True)
+
+if 'mm' in feature_sets:
+    file_path = f"{data_path}/data_mm.csv"
+    data_mm = pd.read_csv(file_path)
+    # data_mm.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+if 'types' in feature_sets:
+    if encoding == 'target':
+        file_path = f"{data_path}/hla_a_raw.csv"
+        hla_a_raw = pd.read_csv(file_path)
+
+        file_path = f"{data_path}/hla_b_raw.csv"
+        hla_b_raw = pd.read_csv(file_path)
+
+        file_path = f"{data_path}/hla_dr_raw.csv"
+        hla_dr_raw = pd.read_csv(file_path)
+
+        # handling broads and splits in raw hla types
+        a_split_broad_dict = {2: [203, 210], 9: [23, 24], 10: [25, 26, 34, 66], 19: [29, 30, 31, 32, 33, 74],
+                              24: [2403], 28: [68, 69]}
+        #a_split_broad_dict = {203:2, 210:2}
+
+        b_split_broad_dict = {5: [51, 52, 5102, 5102], 7: [703], 12: [44, 45], 14: [64, 65],
+                              15: [62, 63, 65, 76, 77], 16: [38, 39, 3901, 3902], 17: [57, 58], 21: [49, 50, 4005]
+            , 22: [54, 55, 56], 27: [2708], 39: [3901, 3902], 40: [60, 61], 51: [5102, 5103],
+                              70: [71, 72]}
+
+        dr_split_broad_dict = {1: [103], 2: [15, 16], 3: [17, 18], 5: [11, 12],
+                               6: [13, 14, 1403, 1404], 14: [1403, 1404]}
+        for hla_type in ['a', 'b', 'dr']:
+            for don_rec in ['DON', 'REC']:
+                for loc in ['1', '2']:
+                    for broad, splits in vars()[f'{hla_type}_split_broad_dict'].items():
+                        for split in splits:
+                            vars()[f'hla_{hla_type}_raw'][f'{don_rec}_{hla_type.upper()}{loc}'] = vars()[f'hla_{hla_type}_raw'][f'{don_rec}_{hla_type.upper()}{loc}'].mask(vars()[f'hla_{hla_type}_raw'][f'{don_rec}_{hla_type.upper()}{loc}'] == split, broad)
+
+    else:
+        file_path = f"{data_path}/hla_a_encoded.csv"
+        hla_a_encoded = pd.read_csv(file_path)
+        # hla_a_encoded.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+        file_path = f"{data_path}/hla_b_encoded.csv"
+        hla_b_encoded = pd.read_csv(file_path)
+        # hla_b_encoded.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+        file_path = f"{data_path}/hla_dr_encoded.csv"
+        hla_dr_encoded = pd.read_csv(file_path)
+        # hla_dr_encoded.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+if 'pairs' in feature_sets:
+    file_path = f"{data_path}/hla_a_pairs.csv"
+    hla_a_pairs = pd.read_csv(file_path)
+    # hla_a_pairs.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+    file_path = f"{data_path}/hla_b_pairs.csv"
+    hla_b_pairs = pd.read_csv(file_path)
+    # hla_b_pairs.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+    file_path = f"{data_path}/hla_dr_pairs.csv"
+    hla_dr_pairs = pd.read_csv(file_path)
+    # hla_dr_pairs.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+if 'site' in feature_sets:
+    file_path = f"{data_path}/transCenter.csv"
+    trans_center = pd.read_csv(file_path)
+    # trans_center.drop(['Unnamed: 0'], axis=1, inplace=True)
+
+# data_basic = pd.concat([data_basic, data_mm['MM'], hla_a_encoded, hla_b_encoded, hla_dr_encoded, hla_a_pairs
+# , hla_b_pairs, hla_dr_pairs], axis = 1)
+
+
+print('Creating feature sets')
+data_x = {}
+data_x['basic'] = {}
+data_x['basic']['pre'] = pd.DataFrame()
+
+if 'site' in feature_sets:
+    data_x['site'] = {}
+    data_x['site']['all'] = trans_center
+
+if 'mm' in feature_sets:
+    data_x['mm'] = {}
+    data_x['mm']['total'] = data_mm['MM']
+    data_x['mm']['a_b_dr'] = pd.concat([data_mm['A_MM'], data_mm['B_MM'],
+                                        data_mm['DR_MM']], axis=1)
+
+if 'types' in feature_sets:
+    if encoding == 'target':
+        data_x['types'] = {}
+        data_x['types']['all'] = pd.concat([hla_a_raw, hla_b_raw, hla_dr_raw], axis=1)
+    else:
+        data_x['types'] = {}
+        data_x['types']['all'] = pd.concat([hla_a_encoded, hla_b_encoded,
+                                        hla_dr_encoded], axis=1)
+
+if 'pairs' in feature_sets:
+    data_x['pairs'] = {}
+    data_x['pairs']['all'] = pd.concat([hla_a_pairs, hla_b_pairs,
+                                        hla_dr_pairs], axis=1)
+
+if ('types' in feature_sets) and ('freq' in type_feat_set):
+    print('Creating frequent types features')
+    feature_sets['types'].remove('freq')
+    hla_a_freq = hla_a_encoded.sum()
+    hla_b_freq = hla_b_encoded.sum()
+    hla_dr_freq = hla_dr_encoded.sum()
+    for freq in type_freq:
+        feature_sets['types'].append(freq)
+        hla_a_above_freq = hla_a_encoded.loc[:, hla_a_freq >= freq]
+        hla_b_above_freq = hla_b_encoded.loc[:, hla_b_freq >= freq]
+        hla_dr_above_freq = hla_dr_encoded.loc[:, hla_dr_freq >= freq]
+        data_x['types'][freq] = pd.concat([hla_a_above_freq, hla_b_above_freq,
+                                           hla_dr_above_freq], axis=1)
+
+if ('pairs' in feature_sets) and ('freq' in pair_feat_set):
+    print('Creating frequent pairs features')
+    feature_sets['pairs'].remove('freq')
+    hla_a_freq = hla_a_pairs.sum()
+    hla_b_freq = hla_b_pairs.sum()
+    hla_dr_freq = hla_dr_pairs.sum()
+    for freq in pair_freq:
+        feature_sets['pairs'].append(freq)
+        hla_a_above_freq = hla_a_pairs.loc[:, hla_a_freq >= freq]
+        hla_b_above_freq = hla_b_pairs.loc[:, hla_b_freq >= freq]
+        hla_dr_above_freq = hla_dr_pairs.loc[:, hla_dr_freq >= freq]
+        data_x['pairs'][freq] = pd.concat([hla_a_above_freq, hla_b_above_freq,
+                                           hla_dr_above_freq], axis=1)
+
+if ('basic' in feature_sets) and ('post' in basic_feat_set):
+    file_path = f"{data_path}/post_feat.csv"
+    data_x['basic']['post'] = pd.read_csv(f'{file_path}')
+
+if ('all' in feature_sets) and ('mm' in feature_sets) and ('types' in feature_sets) and ('pairs' in feature_sets):
+    print('creating all feature set when features are already loaded')
+    data_x['mm'] = {}
+    data_x['mm']['total'] = data_mm['MM']
+    data_x['mm']['a_b_dr'] = pd.concat([data_mm['A_MM'], data_mm['B_MM'],
+                                        data_mm['DR_MM']], axis=1)
+
+    # data_x['types'] = {}
+    data_x['types']['all'] = pd.concat([hla_a_encoded, hla_b_encoded,
+                                        hla_dr_encoded], axis=1)
+
+    # data_x['pairs'] = {}
+    data_x['pairs']['all'] = pd.concat([hla_a_pairs, hla_b_pairs,
+                                        hla_dr_pairs], axis=1)
+
+    data_x['all'] = {}
+    data_x['all']['all'] = pd.concat([data_x['mm']['total'], data_x['mm']['a_b_dr'],
+                                      data_x['types']['all'], data_x['pairs']['all']], axis=1)
+
+if ('all' in feature_sets) and ('mm' not in feature_sets) and ('types' not in feature_sets) and (
+        'pairs' not in feature_sets):
+    file_path = f"{data_path}/post_feat.csv"
+    data_x['basic']['post'] = pd.read_csv(f'{file_path}')
+
+    print('loading all features when feature set only conains all')
+    file_path = f"{data_path}/data_mm.csv"
+    data_mm = pd.read_csv(file_path)
+
+    file_path = f"{data_path}/hla_a_encoded.csv"
+    hla_a_encoded = pd.read_csv(file_path)
+
+    file_path = f"{data_path}/hla_b_encoded.csv"
+    hla_b_encoded = pd.read_csv(file_path)
+
+    file_path = f"{data_path}/hla_dr_encoded.csv"
+    hla_dr_encoded = pd.read_csv(file_path)
+
+    file_path = f"{data_path}/hla_a_pairs.csv"
+    hla_a_pairs = pd.read_csv(file_path)
+
+    file_path = f"{data_path}/hla_b_pairs.csv"
+    hla_b_pairs = pd.read_csv(file_path)
+
+    file_path = f"{data_path}/hla_dr_pairs.csv"
+    hla_dr_pairs = pd.read_csv(file_path)
+
+    data_x['mm'] = {}
+    data_x['mm']['total'] = data_mm['MM']
+    data_x['mm']['a_b_dr'] = pd.concat([data_mm['A_MM'], data_mm['B_MM'],
+                                        data_mm['DR_MM']], axis=1)
+
+    data_x['types'] = {}
+    data_x['types']['all'] = pd.concat([hla_a_encoded, hla_b_encoded,
+                                        hla_dr_encoded], axis=1)
+
+    data_x['pairs'] = {}
+    data_x['pairs']['all'] = pd.concat([hla_a_pairs, hla_b_pairs,
+                                        hla_dr_pairs], axis=1)
+    data_x['all'] = {}
+    data_x['all']['all'] = pd.concat([data_x['mm']['total'], data_x['mm']['a_b_dr'],
+                                      data_x['types']['all'], data_x['pairs']['all']], axis=1)
+
+print('-------------------')
+print('shape of data_basic')
+print(np.shape(data_basic))
+# %% Train and evaluate models then save results
+run_path = f'{results_path}/{run_name}'
+pathlib.Path(run_path).mkdir(mode=0o775, exist_ok=True)
+
+for seed in seeds:
+    for feat, variants in feature_sets.items():
+        for v in variants:
+            CV_Best_name = f'Best_CV_C_Index_{feat}_{v}'
+            C_Index_Test_name = f'Best_Test_C_Index_{feat}_{v}'
+            AUC_Test_name = f'Best_Test_AUC_{feat}_{v}'
+            vars()[CV_Best_name] = []
+            vars()[C_Index_Test_name] = []
+            vars()[AUC_Test_name] = []
+
+for seed in seeds:
+    summary_file_name = f'{run_path}/Summary_seed={seed}.txt'
+    summary_file = open(summary_file_name, 'w')
+    best_variant = {}
+    for feat, variants in feature_sets.items():
+        print('---------')
+        print(feat, variants, 'seed number =' f'{seed}')
+        print('-----------')
+        best_variant[feat] = ('', 0)
+        for v in variants:
+            print(f'Current feature set: {feat}; variant: {v}')
+            print('Separating into training and test sets')
+            if feat != 'all':
+                if feat == 'basic':
+                    data_x_v = pd.concat([data_basic, data_x[feat][v]], axis=1)
+                    print(feat, np.shape(data_x_v))
+                else:
+                    if basic_feat_set[0] == 'post':
+                        data_basic_feat = pd.concat([data_basic, data_x['basic']['post']], axis=1)
+                        data_x_v = pd.concat([data_basic_feat, data_x[feat][v]], axis=1)
+                        print(feat, np.shape(data_x_v))
+                    else:
+                        data_basic_feat = pd.concat([data_basic, data_x['basic']['pre']], axis=1)
+                        data_x_v = pd.concat([data_basic_feat, data_x[feat][v]], axis=1)
+                        print(feat, np.shape(data_x_v))
+            else:
+                if basic_feat_set[0] == 'post':
+                    data_x_v = pd.concat([data_basic, data_x['basic']['post'], data_x['all']['all']], axis=1)
+                    print('shape of data_x_v for post:', np.shape(data_x_v))
+                else:
+                    data_x_v = pd.concat([data_basic, data_x['all']['all']], axis=1)
+                    print('shape of data_x_v for pre:', np.shape(data_x_v))
+            # Separate into train and test (holdout) sets
+            x_train_valid, x_test, y_train_valid, y_test = train_test_split(
+                data_x_v, data_y, test_size=test_size, random_state=seed)
+            print('shape of untouched data', np.shape(x_train_valid), np.shape(x_test), np.shape(y_train_valid), np.shape(y_test) )
+            print(np.shape(x_train_valid), np.shape(x_test), np.shape(y_train_valid), np.shape(y_test))
+            if (encoding == 'target') and (target_encoding_version == '1') and (feat == ('types') or ('all')):
+                print('target encoding version 1')
+                x_train_valid, x_test, y_train_valid, y_test = target_encoding_v_1(x_train_valid, x_test, y_train_valid, y_test)
+                print('shape of data after target encoding',np.shape(x_train_valid), np.shape(x_test), np.shape(y_train_valid), np.shape(y_test))
+            if (encoding == 'target') and (target_encoding_version == '2') and (feat == ('types') or ('all')):
+                print(f'target encoding version 2, {target_encoding_year}years')
+                x_train_valid, x_test, y_train_valid, y_test = target_encoding_v_2(x_train_valid, x_test, y_train_valid, y_test, target_encoding_year)
+                print('shape of data after target encoding', np.shape(x_train_valid), np.shape(x_test),
+                      np.shape(y_train_valid), np.shape(y_test))
+            # Separate train data into train and validation sets
+            rs = ShuffleSplit(n_splits=1, test_size=valid_size / (1 - test_size),
+                              random_state=seed)
+            # x_train, x_valid, y_train, y_valid = train_test_split(
+            #     x_train_valid, y_train_valid, test_size=valid_size/(1-test_size),
+            #     random_state=seed)
+            # # Split train set into 5 folds for cross-validation
+            # kf = KFold(n_splits=cv_folds)
+            print('Fitting model by cross validation')
+            if model == 'coxnet':
+                for train_index, valid_index in rs.split(x_train_valid):
+                    # print(train_index, valid_index)
+                    x_train = x_train_valid.iloc[train_index]
+                    y_train = y_train_valid[train_index]
+                    x_valid = x_train_valid.iloc[valid_index]
+                    y_valid = y_train_valid[valid_index]
+                # Manually perform grid search over l1_ratio since the Coxnet
+                # predict() function doesn't work like GridSearchCV is expecting
+                valid_results = np.zeros((alpha_range.size, l1_ratio_range.size))
+                for l1_index, l1_ratio in enumerate(l1_ratio_range):
+                    # print(l1_index, l1_ratio)
+                    estimator = CoxnetSurvivalAnalysis(
+                        alphas=alpha_range, l1_ratio=l1_ratio,
+                        alpha_min_ratio=0.0001)
+                    try:
+                        estimator.fit(x_train, y_train)
+                    except ArithmeticError as err:
+                        print(f'ArithmeticError: {err}')
+                        continue
+                    for alph_index, alph in enumerate(alpha_range):
+                        # print(alph_index, alph)
+                        prediction = estimator.predict(x_valid, alph)
+                        valid_results_all = concordance_index_censored(
+                            y_valid["status"], y_valid["survival_censoring_days"],
+                            prediction)
+                        valid_results[alph_index, l1_index] = valid_results_all[0]
+                # Create dictionary structure for cross-validation results similar
+                # to GridSearchCV structure
+                # cv_results_dict = {}
+                # cv_results_dict['param_alpha'] = alpha_range
+                # cv_results_dict['param_l1_ratio'] = l1_ratio_range
+                # cv_results_dict['mean_test_score'] = valid_results
+                # cv_results_dict['row_param'] = 'alpha'
+                # cv_results_dict['col_param'] = 'l1_ratio'
+                # cv_results_file_name = f'{run_path}/{model}_{feat}_{v}_cv_results.txt'
+                # with open(cv_results_file_name, 'w') as cv_results_file:
+                #    print(cv_results_dict, file=cv_results_file)
+                # pickle_file_name = f'{run_path}/{model}_{feat}_{v}_cv_results.pkl'
+                # pickle.dump(cv_results_dict, open(pickle_file_name, 'wb'))
+                best_param_index = np.unravel_index(np.argmax(valid_results),
+                                                    valid_results.shape)
+                best_alpha = alpha_range[best_param_index[0]]
+                best_l1_ratio = l1_ratio_range[best_param_index[1]]
+                valid_results_best = valid_results[best_param_index]
+                if valid_results_best > best_variant[feat][1]:
+                    best_variant[feat] = (v, valid_results_best)
+                print(f'{model} with feature set {feat} variant {v}:',
+                      file=summary_file)
+                print(f'Best CV C-index: {valid_results_best}', file=summary_file)
+                print(f'Best alpha value: {best_alpha}', file=summary_file)
+                print(f'Best l1 ratio: {best_l1_ratio}', file=summary_file)
+                # Train model on entire training set and predict on test set
+                print('Fitting model on entire training set')
+                estimator = CoxnetSurvivalAnalysis(alphas=alpha_range,
+                                                   l1_ratio=best_l1_ratio,
+                                                   alpha_min_ratio=0.0001)
+                estimator.fit(x_train_valid, y_train_valid)
+                prediction = estimator.predict(x_test, best_alpha)
+            else:
+                if model == 'random_forest':
+                    rf = RandomSurvivalForest(n_jobs=n_jobs, random_state=seed,
+                                              verbose=0)
+                    gs = GridSearchCV(rf, param_rf, cv=rs, verbose=verbose,
+                                      n_jobs=n_jobs)
+                elif model == 'gradient_boosting':
+                    gb = GradientBoostingSurvivalAnalysis(random_state=seed,
+                                                          verbose=verbose)
+                    gs = GridSearchCV(gb, param_gb, cv=rs, n_jobs=n_jobs,
+                                      verbose=verbose)
+                elif model == 'kernel_svm':
+                    ksvm = FastKernelSurvivalSVM(kernel='rbf', random_state=seed,
+                                                 verbose=verbose)
+                    gs = GridSearchCV(ksvm, param_ksvm, cv=rs, n_jobs=n_jobs,
+                                      verbose=verbose)
+                    # Modify training times of 0 since the SVM struggles with them
+                    zero_days = np.where(y_train['survival_censoring_days'] == 0)
+                    y_train['survival_censoring_days'][zero_days[0]] = 0.1
+                else:
+                    raise ValueError("Invalid choice of model")
+                # # Split training set into portion used for parameter tuning and rest
+                # if cv_size == 1:
+                #     x_train_cv = x_train
+                #     y_train_cv = y_train
+                # else:
+                #     cv_split = train_test_split(x_train, y_train, train_size=cv_size,
+                #                                 random_state=seed)
+                #     x_train_cv = cv_split[0]
+                #     y_train_cv = cv_split[2]
+                # Perform grid search cross validation
+                gs.fit(x_train_valid, y_train_valid)
+                # cv_results_file_name = f'{run_path}/{model}_{feat}_{v}_cv_results.txt'
+                # with open(cv_results_file_name, 'w') as cv_results_file:
+                #    print(gs.cv_results_, file=cv_results_file)
+                # pickle_file_name = f'{run_path}/{model}_{feat}_{v}_cv_results.pkl'
+                # pickle.dump(gs.cv_results_, open(pickle_file_name, 'wb'))
+                if gs.best_score_ > best_variant[feat][1]:
+                    best_variant[feat] = (v, gs.best_score_)
+                print(f'{model} with feature set {feat} variant {v}:',
+                      file=summary_file)
+                print(f'Best CV C-index: {gs.best_score_}',
+                      file=summary_file)
+                print('Best parameters:', file=summary_file)
+                print(gs.best_estimator_, file=summary_file)
+                # Train model on entire training set and predict on test set
+                estimator = gs.best_estimator_
+
+                # if cv_size < 1:
+                #     print('Fitting model on entire training set')
+                #     estimator.verbose = verbose
+                #     estimator.fit(x_train, y_train)
+                print('Generating predictions on test set')
+                prediction = estimator.predict(x_test)
+
+            # Evaluate predictions on test set
+            results_c_index = concordance_index_censored(
+                y_test["status"], y_test["survival_censoring_days"], prediction)
+            c_index_best = results_c_index[0]
+            results_auc = cumulative_dynamic_auc_mod(
+                y_train_valid, y_test, prediction, auc_time_steps)
+            auc_best = results_auc[1]
+            print(f'Best test C-index: {c_index_best}', file=summary_file)
+            print(f'Best test mean AUC: {auc_best}', file=summary_file)
+            # Flush summary text file so results are visible
+            print('', file=summary_file)
+            summary_file.flush()
+            # Save best estimator to pickle file
+            # if save_model:
+            #    pickle_file_name = f'{run_path}/{model}_{feat}_{v}.pkl'
+            #    pickle.dump(estimator, open(pickle_file_name, 'wb'))
+            CV_Best_name = f'Best_CV_C_Index_{feat}_{v}'
+            C_Index_Test_name = f'Best_Test_C_Index_{feat}_{v}'
+            AUC_Test_name = f'Best_Test_AUC_{feat}_{v}'
+            if model == 'coxnet':
+                vars()[CV_Best_name].append(valid_results_best)
+            else:
+                vars()[CV_Best_name].append(gs.best_score_)
+            vars()[C_Index_Test_name].append(c_index_best)
+            vars()[AUC_Test_name].append(auc_best)
+            if model == 'random_forest':
+                del gs
+                import gc
+
+                gc.collect()
+
+    # Best_CV_C_Index.append(valid_results_best)
+    # Best_Test_C_Index.append(c_index_best)
+    # Best_Test_AUC.append(auc_best)
+
+    # analytics_file.close()
+    summary_file.close()
+statistics_file_name = f'{run_path}/Result Analysis.txt'
+statistics_summary_file = open(statistics_file_name, 'w')
+print(f'seeds: {seeds}\n', file=statistics_summary_file)
+
+
+if encoding == 'oneHot':
+    print(f'encoding: {encoding}', file = statistics_summary_file)
+if encoding == 'target':
+    if target_encoding_version == '1':
+        print(f'{encoding} encoding, version {target_encoding_version}', file= statistics_summary_file)
+    if target_encoding_version == '2':
+        print(f'{encoding} encoding, version {target_encoding_version}, YEARS = {target_encoding_year}', file=statistics_summary_file)
+
+for feat, variants in feature_sets.items():
+    for v in variants:
+        print(f'feature set: {feat}, variant: {v}', file=statistics_summary_file)
+        print('------------------------------------------------------------------------------------------------', file=statistics_summary_file)
+        CV_Best_name = f'Best_CV_C_Index_{feat}_{v}'
+        C_Index_Test_name = f'Best_Test_C_Index_{feat}_{v}'
+        AUC_Test_name = f'Best_Test_AUC_{feat}_{v}'
+        print(f'Best CV C Index: {vars()[CV_Best_name]}', file=statistics_summary_file)
+        print(f'Best CV C Index average over {len(seeds)} seeds: {np.mean(vars()[CV_Best_name])}',
+              file=statistics_summary_file)
+        print(f'Best CV C Index variance over {len(seeds)} seeds: {statistics.variance(vars()[CV_Best_name])}\n',
+              file=statistics_summary_file)
+        print(f'Best Test C Index: {vars()[C_Index_Test_name]}', file=statistics_summary_file)
+        print(f'Best Test C Index average over {len(seeds)} seeds: {np.mean(vars()[C_Index_Test_name])}',
+              file=statistics_summary_file)
+        print(f'Best Test C Index variance over {len(seeds)} seeds: {statistics.variance(vars()[C_Index_Test_name])}\n',
+              file=statistics_summary_file)
+        print(f'Best Test AUC: {vars()[AUC_Test_name]}', file=statistics_summary_file)
+        print(f'Best Test AUC average over {len(seeds)} seeds: {np.mean(vars()[AUC_Test_name])}',
+              file=statistics_summary_file)
+        print(f'Best Test AUC variance over {len(seeds)} seeds: {statistics.variance(vars()[AUC_Test_name])}\n\n\n',
+              file=statistics_summary_file)
+
+# print(f'seeds: {seeds}\n', file=summary_file)
+# print(f'Best CV C Index : {Best_CV_C_Index}', file= summary_file)
+# print(f'Best CV C Index average over {len(seeds)} seeds: {np.mean(Best_CV_C_Index)}', file=summary_file)
+# print(f'Best CV C Index variance over {len(seeds)} seeds: {statistics.variance(Best_CV_C_Index)}\n', file=summary_file)
+# print(f'Best Test C Index: {Best_Test_C_Index}', file=summary_file)
+# print(f'Best Test C Index average over {len(seeds)} seeds: {np.mean(Best_Test_C_Index)}', file=summary_file)
+# print(f'Best Test C Index variance over {len(seeds)} seeds: {statistics.variance(Best_Test_C_Index)}\n', file=summary_file)
+# print(f'Best Test AUC: {Best_Test_AUC}', file= summary_file)
+# print(f'Best Test AUC average over {len(seeds)} seeds: {np.mean(Best_Test_AUC)}', file=summary_file)
+# print(f'Best Test AUC variance over {len(seeds)} seeds: {statistics.variance(Best_Test_AUC)}', file=summary_file)
+statistics_summary_file.close()
+
