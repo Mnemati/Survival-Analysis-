@@ -863,4 +863,3 @@ for feat, variants in feature_sets.items():
 # print(f'Best Test AUC average over {len(seeds)} seeds: {np.mean(Best_Test_AUC)}', file=summary_file)
 # print(f'Best Test AUC variance over {len(seeds)} seeds: {statistics.variance(Best_Test_AUC)}', file=summary_file)
 statistics_summary_file.close()
-
